@@ -1,0 +1,814 @@
+---
+title: "Group 2 Modeling Submission"
+author: "Andy Spendlove"
+date: "2024-10-31"
+output: 
+  html_document:
+    toc: true          # Adds a table of contents
+    toc_depth: 3       # Sets depth of headers included in the TOC (optional)
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(rsample)
+library(pROC)
+library(data.table)
+library(skimr)
+library(smotefamily)
+library(glmnet)
+library(ranger)
+```
+
+# NOTE: As explained in my README in my portfolio, my primary contribution to this notebook was writing all of the paragraphs of explanatory text as well as the comments and notes in the code chunks themselves, on top of some coding that helped facilitate the knitting and outputting of a complete, polished, readable document. So while this notebook has the same structure as our final submission, it's been edited to exclusively include my personal contributions, both in writing and in code.
+
+# Introduction
+
+## Business Problem and Stakes
+
+Home Credit, a financial services company, aims to increase financial inclusion by offering loans to individuals with limited or no formal credit history. However, the absence of traditional credit data poses a challenge in assessing these borrowers’ repayment capacity accurately. To prevent financially vulnerable clients from being rejected or overburdened by unmanageable loans, Home Credit seeks a more reliable predictive model to determine loan applicants’ repayment abilities. This model will not only improve client satisfaction but will also support sustainable lending practices by minimizing loan defaults.
+
+## Analytics Approach
+
+To address the business need, the objective is to develop a statistical model capable of predicting a borrower’s likelihood of defaulting on a loan, leveraging the data provided by Home Credit on Kaggle. This dataset includes demographic details and alternative data sources, such as telecommunications usage and transactional behavior. 
+
+Meeting this objective required the following milestones:
+
+1.   Exploratory data analysis
+2.   Cleaning and preparing the data
+3.   Experimenting with classification teachniques, including elastic net logistic regression, support vector machines, and random forest classification
+4.   Tuning models to optimize performance in Area Under ROC curve (AUC)
+5.   Benchmarking tuned model performance against each other and the baseline (majority class classifier) using metrics like accuracy, precision, recall, and AUC.
+6.   Selection of the best model given performance and its natural balance with competing priorities such as runtime, computation intensity, and model complexity.
+7.   Finally, we fit the training data to the model and predicted probability for default on the testing data
+
+This notebook provides a detailed outline of our collective thought process and implementation of the steps above.
+
+NOTE: For ease of running and knitting this notebook, which contains several hundred lines of code, we've opted to use eval=FALSE in many data chunks that are time-intensive to run. For instance, our data cleaning function in the Data Preparation section of the notebook was not evaluated, and instead we read in and present the output of the resulting, cleaned dataframes.
+
+
+
+# Data Preparation
+
+## Data Cleaning
+
+### Examining Variables using Skimpy
+
+Exploratory data analysis was performed individually. Helpful packages such as `tidyverse`, `skimr`, and others made quick work of evaluating data completeness (by row and column), summary statistics (mean, min, etc), variable data type mismatches, features skewness, and more. All these points helped to evaluate how data cleaning would best support the modeling phase.
+
+Below is an example of the comprehensive summaries used to evaluate data cleaning steps.
+
+```{r}
+# Read in raw data provided by Home Credit on Kaggle
+application_train <- as.data.frame(fread("data/application_train.csv"))
+application_test <- as.data.frame(fread("data/application_test.csv"))
+
+# Examine the data
+skim(application_train)
+```
+
+### Feature Engineering using PCA
+
+The core dataset featured many variables, some tracking similar items (such as "dwelling" or "document" -related variables). These were analyzed using PCA (principal component analysis) in Python (`from sklearn.decomposition import PCA`); the idea was to capture the majority of the variance in fewer components (columns). This would reduce dimensionality and concentrate whatever predictive power remains in a simpler eventual model. 
+
+Initial analysis was performed on the 20 `FLAG_DOCUMENT_#` features. We found only 10% of the variance was captured by the first 5 significant components, indicating PCA’s limited utility in this case. A logistic regression on all components showed little to no predictive power, suggesting these document-related flags may not be useful predictors. 
+
+The various variables related to a subjects housing (i.e. `FLOORMAX`, `BASEMENTAREA_MEDI`, etc.) benefitted greatly from PCA; the first 5 principal components captured 87% of the variance from the original 14 columns. However, these variables are nearly 60% incomplete. Even among records without missing data, these variables showed very poor predictive power in a simple, logistic regression.
+
+### Additional Insights
+
+We found that a handful of categorical variables held substantial variance with the target variable. These included: `NAME_INCOME_TYPE`, `NAME_EDUCATION_TYPE`, `ORGANIZATION_TYPE`, and `OCCUPATION_TYPE`. Preserving these variables as factors was a big priority.
+
+Additionally, variables `EXT_SOURCE_#` related to credit worthiness scores from external sources. These also proved highly predictive so imputing missing values where needed took priority.
+
+## Performing the Data Cleaning
+
+After this thorough examination, we made the following data cleaning decisions:
+
+*    Remove each of the FLAG_DOCUMENT variables and the housing-related variables (identified through words like MODE, MED, AVG) 
+    *   *Theory: high dimensionality, data incompleteness, and low predictive power*
+*   Imputed missing values with appropriate values in fields like `EXT_SOURCE_`, `OWN_CAR_AGE`, and `AMT_REQ_CREDIT_BUREAU_X` based on logical assumptions
+    *   *Theory: NAs in `NAME_TYPE_SUITE` imputed as "Unaccompanied"; distribution among categorical levels made sense*
+    *   *Theory: NAs in `EXT_SOURCE_` were imputed with median due to skewness; accompanying features flagging records as imputed were generated*
+    *   *Theory: NAs in `OWN_CAR_AGE` were imputed as zero (0) indicating no years of car ownership; non-NAs were incremented by 1 to indicate X years of ownership*
+*   Assign categorical values for missing entries in fields like `NAME_TYPE_SUITE` and `OCCUPATION_TYPE`
+    *   *Theory: NAs in these variables were replaced with existing "miscellaneous"-related values, such as "XNA"*
+*   Cast variables as intended types:
+    *   Binary to type `<logical>`
+    *   Category to type `<factor>`
+    *   Others, where applicable
+
+To perform this cleaning, we wrote this `application_cleaning()` function in R:
+
+```{r, eval=FALSE}
+  # Remove XNA rows from CODE_GENDER
+
+# Convert numeric variables with 2 unique values to boolean
+
+# Convert character variables with 2 unique values to boolean
+
+# Change "TARGET" to "DEFAULT"
+
+# Change "CODE_GENDER" to "GENDER_MALE"
+
+# Change "NAME_CONTRACT_TYPE" to "CASH_LOAN"
+
+# Impute blanks with NA
+
+# Impute NAME_TYPE_SUITE with "Unaccompanied"
+
+# Impute OCCUPATION_TYPE with XNA
+
+# Convert all character columns to factors
+
+# Remove rows where FLAG_OWN_CAR = "Y" and OWN_CAR_AGE is NA
+
+# Add 1 year to all non-NA values of OWN_CAR_AGE
+
+# Replace remaining NAs in OWN_CAR_AGE with 0
+
+# Replace NAs in EXT columns with the mean or median of the column
+# Take mean of source 1 and median of source 2 and 3
+
+# Add columns to indicate imputed or not
+
+# Replace NAs
+
+# Remove rows with any remaining NA values
+
+```
+
+We then applied the function to the train and test data sets, saving them as new, cleaned dataframes. We then examined the resulting objects with skim() and calculating the % difference between the pre- and post-cleaning dataframes.
+
+```{r, eval=FALSE}
+# Apply the function to both the train and test data, saving as new, cleaned dataframes.
+```
+
+```{r, include=FALSE}
+# Read in raw data provided by Home Credit on Kaggle
+```
+
+```{r}
+# Examine cleaned dataframe to ensure cleaning was successful
+skim(application_train_clean)
+```
+
+```{r}
+# Calculate number of rows and columns
+num_rows_train <- nrow(application_train)
+num_rows_clean <- nrow(application_train_clean)
+num_cols_train <- ncol(application_train)
+num_cols_clean <- ncol(application_train_clean)
+
+# Calculate percentages
+row_percentage <- (num_rows_clean / num_rows_train) * 100
+col_percentage <- (num_cols_clean / num_cols_train) * 100
+
+# Print results
+cat("Number of rows in application_train:", num_rows_train, "\n")
+cat("Number of rows in application_train_clean:", num_rows_clean, "\n")
+cat("Percentage of rows in application_train_clean compared to application_train: ", 
+    round(row_percentage, 2), "%\n", sep="")
+
+cat("Number of columns in application_train:", num_cols_train, "\n")
+cat("Number of columns in application_train_clean:", num_cols_clean, "\n")
+cat("Percentage of columns in application_train_clean compared to application_train: ", 
+    round(col_percentage, 2), "%\n", sep="")
+
+# Calculate number of rows and columns for application_test and application_test_clean
+num_rows_test <- nrow(application_test)
+num_rows_test_clean <- nrow(application_test_clean)
+num_cols_test <- ncol(application_test)
+num_cols_test_clean <- ncol(application_test_clean)
+
+# Calculate percentages
+test_row_percentage <- (num_rows_test_clean / num_rows_test) * 100
+test_col_percentage <- (num_cols_test_clean / num_cols_test) * 100
+
+# Print results for application_test and application_test_clean
+cat("Number of rows in application_test:", num_rows_test, "\n")
+cat("Number of rows in application_test_clean:", num_rows_test_clean, "\n")
+cat("Percentage of rows in application_test_clean compared to application_test: ", 
+    round(test_row_percentage, 2), "%\n", sep="")
+
+cat("Number of columns in application_test:", num_cols_test, "\n")
+cat("Number of columns in application_test_clean:", num_cols_test_clean, "\n")
+cat("Percentage of columns in application_test_clean compared to application_test: ", 
+    round(test_col_percentage, 2), "%\n", sep="")
+
+```
+
+We removed only a small fraction of the total rows from each dataset during cleaning, but removed more than half of the columns. Additionally, each row and column are complete (no missing values). This reduction of dimensionality make the data sets farmore  suited to the modeling task ahead.
+
+
+## Data Balancing
+
+We initially took these cleaned dataframes, `application_train_clean` and `application_test_clean`, and began basic model exploration. However, it became clear that the imbalanced target class (`DEFAULT`) was limiting predictive power (covered in the Modeling Process section below).
+
+Below is the observed imbalance in `DEFAULT` from the cleaning data:
+
+```{r}
+# Create proportion table for target variable, DEFAULT.
+table(application_train_clean$DEFAULT) |> prop.table()
+```
+
+Almost 92% of subjects in the training set were in the non-default ("FALSE") class. It made sense, therefore, that the designed models were falling short in performance since the tendancy was to over classify for not-default. 
+
+It was clear the next step was to balance the data. We made use of the *Synthetic Minority Oversampling Technique* (SMOTE), made available in the R package `{smotefamily}`, to synthetically balance the data. This involved extra formatting of the data, removing constant columns, formatting the data types propertly, and creating dummy variables via one-hot encoding for categorical features in the dataset. 
+
+This is the function that would process the `application_train_clean` data frame:
+
+```{r, eval=FALSE}
+# Check for single value columns
+
+# Format data
+
+# Confirm imbalance
+
+# One-hot-encode variables with {caret}
+
+# Apply SMOTE
+
+# Extract SMOTE data
+
+# Confirm rebalance
+```
+
+```{r, include=FALSE}
+# Read in SMOTE-cleaned data, to illustrate results
+application_train_smote <- as.data.frame(fread("data/application_train_smote.csv"))
+```
+
+We then examined the resulting balancing within the target variable. 
+
+```{r}
+# Create new proportion table for target variable, DEFAUL, from SMOTE-cleaned data
+table(application_train_smote$DEFAULT) |> prop.table()
+```
+
+This near-50-50 split achieved through SMOTE was a huge improvement over the initial imbalance in the target variable, and it indeed served to improve our models (which, again, is covered in detail below in the Modeling Process section of this notebook).
+
+```{r}
+dim(application_train_smote)
+```
+
+We see that dimensionality has changed dramatically. We have many more columns due to the one-hot-encoding and more rows. We have more records due to how SMOTE balances the data. It oversamples or draws from the minority class for extra records. This is expected and desired.
+
+With a fully formatted, balanced dataset, 
+
+
+## Setting a Majority Class Baseline
+
+The final step in data preparation required deriving "baseline" performance. Per industry standard, this is done using the "majority class classifier", an assumption that the most common classification is assumed for each subject in the data set. The resulting performance allows for informed comparison against more complex, models developed in the next phase. The goal is for these models to best the performance of the "baseline" model. We evaluate such using AUC, accuracty, precision, and recall.
+
+We created two majority class baseline models: one based on our initial imbalanced, cleaned data and another based on the more balanced, cleaned dataframe achieved through using SMOTE. Starting with the imbalanced data, we set the predicted value to `FALSE` (not default) and created a confusion matrix and summary statistics.
+
+```{r, eval=FALSE}
+# Rename dataframes, for brevity and legibility
+
+# Set predicted value to FALSE (non-default)
+
+# Create confusion matrix
+
+# Calculate summary statistics
+
+# Create summarizing vector "performance1"
+
+```
+
+Then we replicated the process for the SMOTE-balanced data.
+
+```{r, eval=FALSE}
+# Set predicted value to "N" (non-default) for balanced data
+
+# Create confusion matrix
+
+# Calculate summary statistics
+
+# Create summarizing vector "performance2"
+
+```
+
+These results were saved to a .CSV to combine with later model performance when we evaluate the spectrum of options (see "Model Performance" section below).
+
+
+# Modeling Process
+
+Now that the data was cleaned and prepared, we advanced our work in experimenting with different models. The process involved formatting the data properly, splitting the training data into train/test sets suitable for cross validation, and finding optimal hyperparameters for model tuning. Each model, using its best configuration, was evaluated on test data in accuracy, precision, recall, and AUC.
+
+## Model Selection
+
+We considered each of the different modeling techniques that we've learned about and worked with both academically and professionally, considering which ones would be best suited for this unique classification problem involving a massive data set containing (even after extensive cleaning and feature engineering) hundreds of thousands of rows and dozens of possible predictor variables. 
+
+Ultimately, we decided to train our data using three different modeling techniques that we believed would be well-suited for the task:
+
+1. Elastic Net Logistic Regression - Selected for its capability to effectively handle high-dimensional datasets like this one, elastic net regression performs variable selection and regularization simultaneously by combining the strengths of Lasso and Ridge penalties. We believed this would help mitigate overfitting and enhance generalizability, which seemed like potential major issues with a dataset of this size. Elastic net regression is also able to produce interpretable coefficient estimates, unlike some machine learning techniques, which could be crucial for the company in understanding the exact relationships between their data features and loan default. It's also computationally efficient.
+
+2. Support Vector Machines - Selected because it also excels in high-dimensional spaces, particularly in its ability to find the hyperplane that maximizes the margin between classes, making it potentially very powerful for distinguishing between borrowers who are likely to default and those who aren't. Its ability to be adapted using kernel functions was also appealing, since it could capture the potentially complex relationship between variables without requiring overly complicated, additional, manual variable transformations, which could threaten the interpretability of the model. The volume of records (500K+) isn't optimal for SVM since it is a compuationally inefficient method.
+
+3. Random Forests - Selected for its effectiveness with classification problems specifically, as well as its ability to mitigate overfitting and enhance predictive accuracy through its use of multiple (often hundreds of) decision trees. This, again, is particularly advantageous for our model with its dozens of potential predictors. More than elastic net or SVM, random forest models are less sensitive to noise and outliers, of which there could still be many in this massive dataset. Also, importantly, Random Forest excels in managing both categorical and continuous variables, making it an ideal choice for analyzing the diverse types of data we are working with, such as demographic and transactional information.
+
+
+## Elastic Net Logistic Regression
+
+### Model Preparation
+
+Leveraging elastic net logistic regression in R using the `{glmnet}` package required different formatting of the data. In particular, we had to split the predictors into their own matrix and the target into its own vector. Additionally, to advance the speed of fitting the model, we took a 25% sample of the data. 
+
+```{r eval=FALSE}
+# Using SMOTE-balanced data, renaming for brevity
+
+# Splits
+
+# 25% sample of the data
+
+```
+
+```{r eval=FALSE}
+# Split predictors and target for train data
+
+# Split predictors and target for test data
+
+```
+
+### Fitting the model
+
+We then fit an elastic net model leveraging cross validation, using the default 10 folds and specifying AUC as the measure to optimize and include in the output.
+
+```{r, eval=FALSE}
+# Fit an elastic net model using cross-validation
+
+    # Matrix of predictor variables
+    # Establish target variable
+    # Specify binomial model for binary outcome
+    # Set elastic net mix parameter
+    # Add AUC as performance metric
+
+```
+
+Results of the optimal model (best AUC) and the conservative model (AUC within 1 standard error) were very, very similar. Using this model, we can predict default on the test data.
+
+
+### Evaluating model on test data
+
+Next, we applied the model to the test data, first using it to predict new probabilities of classification and then finding the ideal threshold for classification of the probabilities.
+
+```{r, eval=FALSE}
+# Predict new probabilities of classification
+
+# Find the optimal classification threshold
+
+```
+
+The optimal threshold came out to be 0.428. We then constructed a confusion matrix, after converting the predicted probabilities into binary classifications using the optimal threshold we just found, providing us with performance metrics for this model.
+
+```{r, eval=FALSE}
+# Construct confusion matrix
+    # Create predicted classes based on the optimal threshold
+    # If predicted probabilities exceed the optimal threshold, classify as 1; otherwise, classify as 0
+    # Create actual classes for the test data
+    # Convert the actual target values to a factor, classifying 'Y' as 1 and everything else as 0
+
+```
+
+The full performance results were saved to a dataframe for later comparison to other models. However, we can see the resulting performance of the elastic net here:
+
+```{r}
+elas_net_results <- read.csv('penalized-regression-model-results.csv')
+t(elas_net_results)
+```
+
+These results were decent, though we were hoping to see AUC fall into the 0.8's. 
+
+
+### Hyperparameter Tuning
+
+The above, initial model assumed a perfect 50-50 elastic net, but we hypothesized that a better tuned model could improve performance further. We tried tuning alpha with various values and reducing the number of folds to save on computational time.
+
+```{r eval=FALSE}
+# Selection of different alpha values
+
+# Testing each value in our elastic net model
+
+# Print resulting AUC values, for mix, min, and 1se
+
+```
+
+The resulting AUC values from tuning the alpha parameter showed only marginal differences, staying within the 0.763 to 0.765 range. There really isn't more performance to plumb from tuning aditional hyperparameters.
+
+### Feature Engineering
+
+There's almost certainly some complex relationships to isolate. Because this method is from the OLS family of regression, we can specify some interaction terms with the goal of capturing potential non-linear relationships between predictors. 
+
+After considering our previous analysis of significant predictors *((do we want to be more specific? or rephrase)), we decided on adding interaction terms for the following pairs of variables:
+
+*   `CNT_CHILDREN` and `AMT_CREDIT`
+    *   Theory: the amount of credit given could vary by family size 
+*   `AMT_ANNUITY` and `AMT_CREDIT`
+    *   Theory: 
+*   `DAYS_LAST_PHONE_CHANGE` and `AMT_REQ_CREDIT_BUREAU_DAY`
+    *   Theory: timing of changes in phone plan may correlate to frequent credit checks
+*   `REGION_RATING_CLIENT_W_CITY` and `DEF_30_CNT_SOCIAL_CIRCLE`
+    *   Theory: regional differences should certainly vary those defaulting in one's social circle
+*   `AMT_REQ_CREDIT_BUREAU_DAY` and `AMT_CREDIT`
+    *   Theory: amount of credit being sought may vary based on frequent credit checks
+*   `AMT_CREDIT` and `AMT_GOODS_PRICE`
+    *   Theory: the amount of credit being sought may vary based on the cost of good
+*   `EXT_SOURCE_#` and `IMPUTED_EXT#`
+    *   Theory: in theory, credit scores from external sources may vary by imputed or non-imputed values
+
+We added these interaction terms, like so:
+
+```{r, eval=FALSE}
+# Mutate the dataset to include chosen interaction terms
+
+# Add interaction terms to training and test sample dataframes
+
+```
+
+```{r, eval=FALSE}
+# Convert the training dataframe to a matrix
+
+```
+
+We then fit a cross-validated model again, now adding in these interaction terms.
+
+```{r, eval=FALSE}
+# Fit the elastic net regression model using cross-validation and new matrix of predictors
+
+    # New matrix of predictor variables, with interaction terms added
+    # Establish target variable
+    # Specify binomial model for binary outcome
+    # Set elastic net mix parameter
+    # Add AUC as performance metric
+```
+
+The model achieved a slightly higher AUC of 0.783 with the optimal lambda (with the more conservative 1se lambda again being almost identical, 0.781). So, there was some improvement, with standard error also dropping, but complexity increased, going from 120 predictors in the model without interactions terms to 165, a 37% increase. That's probably not an ideal tradeoff.
+
+Upon examining the most important predictors of that model, we find that:
+
+### Conclusion
+
+Ultimately, attempts to tune hyperparameters and engineer more predictive relationships in the data yielded marginal performance improvements. There's clearly a ceiling for just how much a linear-based model can capture these complex relationships. 
+
+
+
+
+## Support Vector Machines
+
+Support Vector Machines (SVM) were a logical choice for a high-dimensional problem like this one. They performed well in avoiding overfitting and effectively managed high dimensions.
+
+However, SVMs are computationally intensive and are better suited for situations where the number of observations was relatively small. Specifically, they were particularly advantageous when the number of rows exceeded the number of columns, which was not the case in our situation.
+
+Nonetheless, we believed that SVM would provide a viable alternative to tree-based methods and ordinary least squares (OLS) approaches.
+
+### Model Preparation
+
+Leveraging support vector machines in R with the {e1071} package required specific formatting considerations. In particular, any columns with constant values needed to be removed.
+
+Given the computational intensity of SVM, we could not run the model on the entire 550,000-row dataset. Instead, we opted to work with a subset comprising 2% of the data, approximately 10,000 records.
+
+This was the flow for preparing the data for SVM in code format:
+
+```{r, eval=FALSE}
+# Splits
+
+# 2% sample of the data
+
+```
+
+
+This latter code chunk dynamically removed any column that had a single, unique value (a constant). We then had a nice training and testing sample to work with.
+
+### Hyperparameter Tuning
+
+Part of fitting a support vector machine model is selecting hyperparameters. This is done with cross validation. The idea is to test a range of values and choose the combinations that best maximize the performance metric (in our case, AUC).
+
+The resources in the `{caret}` package for cross validated training were not performing correctly so we implemented it by hand:
+
+We have 10 folds to use for cross validation. Our tuning grid uses two different values of `sigma` and five different values for `C` (cost). Together, the tuning grid is 10 unique combinations.
+
+### Fitting the model with CV
+
+Running cross validation is fairly straight forward. The theory is to do the following for each fold:
+
+1.  Get the training and testing sets for the current fold
+2.  Select the hyperparameters corresponding to the current fold
+3.  Train an SVM using the training and hyperparameters
+4.  Make predictions using the fitted SVM with testing
+5.  Calculate the AUC value from the resulting predictions
+6.  Save the AUC value to the corresponding hyperparameters used
+7.  Repeat for the next fold
+
+The code implementation of that is included below: 
+
+```{r, eval=FALSE}
+# Cross-validation function
+        # Values for modeling
+
+        # Training
+       
+        # Testing
+
+        # Evaluation
+
+        # Save measure
+
+```
+
+The results looked as follows:
+
+````
+   sigma     C       AUC
+1   0.01  0.01 0.8189310
+2   0.05  0.01 0.8369932
+3   0.01  0.50 0.8375020
+4   0.05  0.50 0.8221758
+5   0.01  1.00 0.8365004
+6   0.05  1.00 0.8245600
+7   0.01  5.00 0.8205697
+8   0.05  5.00 0.8539352
+9   0.01 10.00 0.8259827
+10  0.05 10.00 0.8229776
+````
+
+The AUC values look quite robust. 
+
+
+### Evaluating model on test data
+
+We can confirm we're achieving this level of performance by training a model on the entire training sample using the hyperparameters identified. We went with `sigma = 0.05` and `C = 5.00`:
+
+
+With these predictions, we can calculate all the performance metrics we care about: accuracy, precision, recall, and AUC:
+
+```{r, eval=FALSE}
+# Calculate AUC
+
+# Caret confusion matrix object has elements for performance
+
+```
+
+We then collect all of the metrics into a vector which is saved as a CSV for later use:
+
+It's a pretty solid model, particularly good with precision (avoiding the type-1 error). We'll refer back to these values when assessing all of the models together.
+
+
+### Feature Engineering
+
+No feature engineering was performed for this model. Thanks to the radial kernal and hyperparameters, we capture complex relationships pretty well already. Additionally, time and computational power didn't permit. We instead moved to benchmark all models against the majority classifier and each other across the performance metrics so far outlined.
+
+### Conclusion
+
+While not perfectly suited to the problem (given the wealth of data), a Support Vector Machine model did well to generalize the training data and avoid overfitting. The resulting performance is very commendable and should provide a good competitor to other models that should do better (such as tree-based methods). 
+
+
+
+## Random Forest
+
+For the Random Forest model, we initially used class weights as a balancing method, with a common set of hyperparameters, setting the number of trees to 500, with a depth of 10. But, while class weights can be a reliable balancing method, because we have a high dimensional data set, our initial attempt to fit the model using class weights yielded severely unbalanced results, with the performance metrics being fairly low (accuracy of 0.73, recall of 0.74, precision of 0.95, and an AUC of 0.81). 
+
+Since this is a tree based model, we decided that SMOTE balancing is much more appropriate, causing us to return to the data preparation phase (as noted earlier), execute SMOTE balancing, and then use the SMOTE data set with the same tree parameters.
+
+### Data Partitioning
+```{r, eval=FALSE}
+# split data set into training and testing sets
+
+# train set
+
+# test set
+
+```
+
+### SMOTE Fitting the Random Forest Model
+```{r, eval=FALSE}
+# convert target column to factor
+
+# fit RF model with 500 trees, 10 depth
+
+# find and print important variables
+
+```
+
+### SMOTE Model Predictions
+```{r, eval=FALSE}
+# predict on train data
+
+# predict on test data
+
+```
+
+### SMOTE Model Confusion Matrix
+```{r, eval=FALSE}
+# get training set confusion matrix
+
+# get testing set confusion matrix
+
+```
+
+### SMOTE AUC Train Set
+```{r, eval=FALSE}
+# Fit RF for AUC calculation with 500 trees and 10 depth
+
+# Train set probabilities
+
+# Train set predictions
+
+# Train set TPR and FPR performance metrics
+
+# Train set AUC performance
+
+# Train set AUC calculation
+
+# Print train set AUC value
+
+```
+
+### SMOTE AUC Test Set
+```{r, eval=FALSE}
+# Test set probabilities
+
+# Test set predictions
+
+# Test set TPR and FPR performance
+
+# Test set AUC performance
+
+# Test set AUC calculation
+
+# Print test set AUC value
+
+```
+
+From the resulting confusion matrix and AUC calculations of the above code, we observed a training set accuracy of 0.94, recall of 1.0, precision of 0.88, and an AUC of 0.97.  In the test set we observed similar results across all metrics, implying that there isn’t overfitting in this model, but there could be improvements across all metrics.
+
+
+### SMOTE Model 2 - Hyperparameter Tuning
+
+After the initial 500 tree, 10 depth model (and prior to going back and SMOTE balancing the data), we tuned our hyperparameters of this class weighted model, increasing the number of trees to 800 and increasing the depth to 20, which would be more appropriate for a data set of this size. In this class weighted, non-SMOTE-balanced model, we observed an accuracy of 0.968, recall of 0.98, precision of 0.98, and an AUC 0.99. 
+
+While these results are much more favorable and the test set resulted in similar accuracy, precision, and recall, the AUC results using the testing set was 0.74, implying a lot of overfitting in the model with the adjusted tree parameters. We hoped that using the SMOTE balanced data instead, demonstated in the code below, could help with that issue, increasing our testing set AUC.
+
+```{r, eval=FALSE}
+# Fit RF with 800 trees and 20 depth
+
+# Train set predictions
+
+# Test set predictions
+
+# Train set confusion matrix
+
+# Test set confusion matrix
+```
+
+### SMOTE AUC Train Set 2
+```{r, eval=FALSE}
+# Fit for AUC calculation with 800 trees, 20 depth
+
+# Train set probabilities
+
+# Train set predictions
+
+# Train set tpr and fpr
+
+# Train set auc performance
+
+# Train set AUC calculation
+
+# Print train set AUC value
+
+```
+
+### SMOTE AUC Test Set 2
+```{r, eval=FALSE}
+# Test set probabilities
+
+# Test set predictions
+
+# Set set tpr and fpr
+
+# Test set auc performance
+
+# Test set AUC calculation
+
+# Print test set AUC value
+
+```
+
+```{r}
+rf_results <- read.csv('random-forest-model-results.csv')
+t(rf_results)
+```
+
+
+The results were much more favorable than the class weighted model, and improved even on the 500 tree, 10 depth SMOTE-balanced model. The confusion matrix and AUC calculations reported an accuracy of 0.957, recall of 1.0, precision of 0.92, and an AUC 0.99. In the test set, we observed an accuracy of 0.955, recall of 1.0, precision of 0.92, and an AUC of 0.978. The AUC remained the same between the first and second model, but the accuracy and precision improved.
+
+We can see that the SMOTE balancing method was much more effective for this type of data set, showing good generalizability between both models. Additionally, increasing the number of trees and depth resulted in an improved model while maintaining generalizability.
+
+
+# Modeling Performance
+
+## Model Comparison
+
+With our models fitted and optimized, we gathered all the results.csv files compiled throughout the project from each model and assembled them into a single dataframe. This consolidated dataframe allowed us to visualize and directly compare the performance metrics of our elastic net, SVM, and random forest models. Additionally, it enabled us to benchmark these models against the two majority class baseline models created during the data preparation phase, allowing us to evaluate how effectively our models surpassed baseline performance metrics.
+
+```{r}
+# Read in already created results files
+
+# Combine into a single dataframe for plotting
+
+
+# Convert to long format and wrap labels
+
+```
+
+```{r}
+library(ggrepel)
+# Create facet plot of performance metrics for all models
+
+```
+
+The resulting plot lays out how each model performs on each metric. Let's go through each of them:
+
+--Majority Class Balanced: This model showed extremely poor performance across most metrics except recall, where it achieved a "perfect" score of 1.0. This outcome is expected, as the balanced majority class model simply predicted "non-default" for every case. Because the target variable was split evenly, its predictions were as accurate as a random coin flip, leading to an AUC score of 0.5. The recall score of 1.0 indicates that it never made Type II errors (false negatives), since it always predicted the positive (non-default) class, but of course, half of its predictions were false positives, resulting in a precision score of 0.5.
+
+--Majority Class Imbalanced: For this model, the data was in its natural, imbalanced state, where 92% of subjects in the training data were in the non-default ("FALSE") class. Because of this, the model achieved an accuracy of 0.92, since its random guess of "non-default" was correct 92% of the time. Its precision and recall were similarly high, a somewhat artificial bar that we wanted to see if our more sophisticated models could clear. Its AUC, of course, was abysmal at 0.5, indicating that the model lacks any real power to distinguish between classes.
+
+--Elastic Net Regression: Among our sophisticated models, the elastic net regression performed the poorest, with an accuracy of 0.7, AUC of 0.76, precision of 0.66, and recall of 0.79. These metrics suggest a high false positive rate in predictions (34% of predicted positives were incorrect), and a moderate rate of missed positive cases, with a 21% false negative rate.
+
+--Support Vector Machine: This model outperformed elastic net in every metric except recall (accuracy 0.83, AUC 0.83, precision 0.89, and recall 0.75). Its precision was particularly impressive, compared to elastic net, indicating a much lower false positive rate. In a case like ours, where Home Credit is likely more interested in minimizing false positives (giving loans to people who end up defaulting) than false negatives (not giving loans to people who wouldn't actually default), having a higher precision is preferable, even if that comes at the expense of recall. Still, this model's accuracy and AUC left something to be desired.
+
+--Random Forest: Our two random forest models were the clear winners across the board, with the second model being even better than the first. Random Forest 2 achieved an excellent accuracy of 0.96, AUC of 0.98, recall of 0.91, and with a precision that was legitimately as high as the artificially high precision of the imbalanced majority class prediction model. 
+
+
+## Performance Metrics for Best Model
+
+With Random Forest 2 being our best model according to this model comparison of training data performance, we put its predictive power to the test by having it generate prediction probabilities on the test data, and then running those predictions through the original Kaggle comp
+
+We first transformed the test dataset to ensure compatibility with the training data, while also creating dummy variables for the categorical features. 
+
+```{r, eval=FALSE}
+# Read in data
+
+# Confirm the correct column count
+
+# Retain unique ID
+
+# Transform 
+
+# Create dummy variables
+
+# Check column count again
+
+# Get common column names
+
+# Finalize data sets
+
+# Confirm sizing
+```
+
+Following this preparation, we trained the Random Forest model (800 trees, depth of 20) on this newly transformed training dataset, "application_train_full." We then had the model generate its predictions on the test dataset, providing the probabilities of loan default for each observation. This comprehensive approach allowed us to rigorously assess the model's effectiveness and validate its performance on unseen data.
+
+```{r, eval=FALSE}
+# Train RF with 800 trees and 20 depth on application_train_full
+
+# Generate probabilities on test data set
+
+```
+
+We then submitted these predictions into the original Kaggle page for this case, generating a "Kaggle score" (in this case, AUC) for our predictions.
+
+The resulting Kaggle score was 0.60628, which would've placed us at rank 6704 out of 7176 on the original competition's leaderboard. This result was very surprising to us; the massive drop from our training data AUC of 0.98 to this actual AUC of 0.606 strongly suggested that our model was overfit, despite our extensive efforts in cross-validation and the fact that we achieved good AUC results with this model on our test data created by partitioning the training data.
+
+![Screenshot of Kaggle results for RF model](submission-and-score-rf.png)
+
+In an effort to diagnose the cause of this major drop in AUC, we took our SVM model and repeated this process of generating predictions, submitting them to the Kaggle webpage, and generating a Kaggle score (actual AUC). Whether or not we saw a similar drop in AUC would be informative on whether the issue was likely with the random forest model itself or if it extended across all of our models.
+
+![Screenshot of Kaggle results for SVM model](submission-and-score-svm.png)
+
+The Kaggle score for the predictions generated from SVM was 0.67299, compared to the test AUC of 0.83 that this model achieved from partitioning the training data. In other words, this model experienced a similar drop as the random forest model, suggesting the presence of an issue leading to this drop in AUC that was not unique to just one of our models (which will be discussed further in the Results section below).
+
+
+# Results
+
+## Conclusions
+
+Our primary goal in this analysis was to develop a robust predictive model to improve Home Credit’s ability to assess loan default risk and better serve underbanked populations. We began with a rigorous process of data exploration, cleaning, and model evaluation and learned that the data was highly dimensional, contained hundreds of thousands of rows and dozens of potential model features, even after extensive cleaning, and was highly imbalanced with respect to the target variable. Based on these findings about the specific nature of the data, we selected three modeling techniques--elastic net logistic regression, support vector machines, and random forests--with which we created our models.
+
+Among these models, the second random forest variant emerged as the top performer on our internal metrics, achieving an accuracy of 96%, AUC of 0.98, and a strong balance between precision and recall. However, upon testing this model on the original Kaggle competition dataset, we observed a significant decline in predictive performance (Kaggle AUC of 0.606). The drop in AUC between our internal validation and the Kaggle leaderboard results, which was also observed with the SVM model, strongly suggests overfitting to our training data.
+
+These results reveal that, while our models show promise within controlled test environments, they may struggle to generalize to real-world, unseen data. This discrepancy indicates a need for further development.
+
+## Theories on Gap
+
+After receiving the poor Kaggle scores on the random forest and SVM models, we spent a significant amount of time combing through our models for what the issue could be that led to the drop in AUC. Our extensive efforts to cross-validate model training indicated solid models, and fitting on the train data and predicting on the test data produced excellent results, indicating no overfitting. 
+
+Our best idea for what is causing the issue is the fact that we applied SMOTE to the entire training dataset, and therefrom took our train/test splits. This meant that the test split was balanced when, in reality, it should have remained imbalanced to remain faithful to the highly imbalanced, actual data against which our model predictions were compared when submitted to Kaggle. 
+
+## Future Development
+
+To further develop the model, we would perform model fit on a balanced train split (SMOTE on application_train) and predict using an imbalanced test split (non-SMOTE from application_train). This would approximate the imbalanced data seen in application_test
+
+
+
