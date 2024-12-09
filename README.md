@@ -1,4 +1,4 @@
-# spendlove-home-credit-portfolio
+# Andy Spendlove: Home Credit Project Portfolio
 This portfolio summarizes my contributions and key takeaways from my capstone project in the MSBA program at the University of Utah, where we developed predictive models to address the business challenge presented in the [Home Credit Default Risk](https://www.kaggle.com/competitions/home-credit-default-risk/data) project on Kaggle. 
 
 # Table of Contents
