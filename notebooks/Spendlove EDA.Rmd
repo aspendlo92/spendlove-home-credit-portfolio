@@ -1,0 +1,435 @@
+---
+title: "EDA"
+author: "Andy Spendlove"
+date: "2024-09-29"
+output: html_document
+---
+
+```{r, echo = TRUE, results = "hide", warning=FALSE, message=FALSE}
+# Call libraries used throughout notebook
+library(dplyr)
+library(pwr)
+library(rpact)
+library(lubridate)
+library(tidyverse)
+library(caret) 
+library(ROCR) 
+library(corrplot)
+library(ggcorrplot)
+
+# Reading in .csv files
+previous_application <- read.csv("C:/Users/aspendlove/Downloads/Capstone/previous_application.csv")
+POS_CASH_balance <- read.csv("C:/Users/aspendlove/Downloads/Capstone/POS_CASH_balance.csv")
+installments_payments <- read.csv("C:/Users/aspendlove/Downloads/Capstone/installments_payments.csv")
+credit_card_balance <- read.csv("C:/Users/aspendlove/Downloads/Capstone/credit_card_balance.csv")
+HC_col_desc <- read.csv("C:/Users/aspendlove/Downloads/Capstone/HomeCredit_columns_description.csv")
+bureau_balance <- read.csv("C:/Users/aspendlove/Downloads/Capstone/bureau_balance.csv")
+bureau <- read.csv("C:/Users/aspendlove/Downloads/Capstone/bureau.csv")
+app_train <- read.csv("C:/Users/aspendlove/Downloads/Capstone/application_train.csv")
+app_test <- read.csv("C:/Users/aspendlove/Downloads/Capstone/application_test.csv")
+# sample <- read.csv("C:/Users/aspendlove/Downloads/Capstone/sample_submission .csv")
+
+# inspect train and test data
+head(app_train)
+colnames(app_train)
+head(app_test)
+colnames(app_test)
+```
+
+
+## Exploring the target variable
+
+### Let's start by getting a feel for the distribution of the target variable in our training dataframe.
+
+```{r}
+# Check the distribution of the target variable in the training data
+target_distribution <- app_train %>%
+  group_by(TARGET) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+print(target_distribution)
+```
+
+```{r}
+# Simple bar plot to visualize magnitude of difference
+ggplot(app_train, aes(x = as.factor(TARGET))) +
+  geom_bar(fill = "steelblue") +
+  labs(x = "Target (0 = Repaid, 1 = Not Repaid)", y = "Count") +
+  ggtitle("Distribution of Target Variable")
+```
+
+### Even though it's fairly obvious from looking at the percent distribution of the classes, let's formally calculate the accuracy of a simple majority class classifier, for good measure.
+
+```{r}
+# Calculate the accuracy of a majority class classifier
+accuracy <- max(target_distribution$percentage) / 100
+print(paste("Accuracy of majority class classifier:", accuracy))
+```
+
+### Clearly, there is a large imbalance in the data toward class 0 (the loan non-default class), which can pose a challenge for model training if we aren't careful, where bias toward this overwhelming majority class could be present in our analysis. Some possible solutions to correct for this imbalance could be oversampling fromt he minority class and undersampling from the majority class, so that we have more balanced train and test data sets.
+
+
+
+
+## Predictor Exploration
+
+### Let's next explore possible predictors for the target in this training dataset. We'll start by calculating each variable's correlation to the target variable and observing the 
+
+```{r}
+# Select only numeric columns from the app_train dataset
+numeric_columns <- app_train %>% select(where(is.numeric))
+
+# Calculate correlations with the target variable
+correlations <- cor(numeric_columns, use = "complete.obs") # Use complete cases for correlation
+
+# Extract correlations with the target variable
+target_correlations <- correlations[,"TARGET"]
+
+# Sort correlations
+sorted_correlations <- sort(target_correlations)
+
+# Display most positive correlations
+most_positive <- tail(sorted_correlations, 15)
+cat("Most Positive Correlations:\n")
+print(most_positive)
+
+# Display most negative correlations
+most_negative <- head(sorted_correlations, 15)
+cat("\nMost Negative Correlations:\n")
+print(most_negative)
+```
+
+### Let's keep a list of these top positively and negatively correlated variables, since they could be some of the strongest candidates for our later models, and let's next create boxplots for each of these, to visually examine their relationship with the target variable. 
+
+
+```{r}
+# Define the variables with the highest and lowest correlations
+high_cor_vars <- c("AMT_REQ_CREDIT_BUREAU_DAY", 
+                   "AMT_REQ_CREDIT_BUREAU_WEEK", 
+                   "DAYS_LAST_PHONE_CHANGE", 
+                   "DEF_30_CNT_SOCIAL_CIRCLE", 
+                   "DEF_60_CNT_SOCIAL_CIRCLE", 
+                   "OBS_60_CNT_SOCIAL_CIRCLE", 
+                   "OBS_30_CNT_SOCIAL_CIRCLE", 
+                   "DAYS_ID_PUBLISH", 
+                   "AMT_REQ_CREDIT_BUREAU_YEAR", 
+                   "OWN_CAR_AGE", 
+                   "DAYS_BIRTH", 
+                   "FLAG_DOCUMENT_3", 
+                   "REGION_RATING_CLIENT", 
+                   "REGION_RATING_CLIENT_W_CITY")
+
+low_cor_vars <- c("EXT_SOURCE_3", 
+                  "EXT_SOURCE_2", 
+                  "EXT_SOURCE_1", 
+                  "FLOORSMAX_AVG", 
+                  "FLOORSMAX_MODE", 
+                  "FLOORSMAX_MEDI", 
+                  "AMT_INCOME_TOTAL", 
+                  "TOTALAREA_MODE", 
+                  "FLOORSMIN_MEDI", 
+                  "FLOORSMIN_AVG", 
+                  "ELEVATORS_AVG", 
+                  "APARTMENTS_AVG", 
+                  "LIVINGAPARTMENTS_AVG", 
+                  "FLOORSMIN_MODE", 
+                  "LIVINGAREA_AVG")
+
+# Combine both lists of variables
+selected_vars <- c(high_cor_vars, low_cor_vars)
+
+# Create boxplots for the selected variables against the TARGET
+for (col in selected_vars) {
+  if (col %in% colnames(app_train)) {  # Check if the column exists
+    p <- ggplot(app_train, aes_string(x = "as.factor(TARGET)", y = col)) +
+      geom_boxplot() +
+      labs(title = paste("Boxplot of", col, "by TARGET"),
+           x = "TARGET",
+           y = col) +
+      theme_minimal()
+    
+    print(p)  # Display the plot
+  } else {
+    warning(paste("Column", col, "not found in the dataset."))
+  }
+}
+```
+
+### These plots illuminate some interesting observations. The mean and quanitles of the Class 1 box in the Days_Birth plot is higher than class 0, suggesting that younger applicants are more likely to default than older ones (which is intuitive). Also each of the three Ext_Source variables, which refer to normalized scores given to the clients, presumably regarding their loan eligibility or credit scores. These three scores appear to be reliable, since the applicants who didn't default on their loans in the training data consistently had higher scores than those who did. Some other clearly interpretable plots are Days_ID_Publish ("How many days before the application did client change the identity document with which he applied") and Days_Last_Phone_Change. The others are harder to make out visually, which in some cases may be due to extreme outliers, such as Amt_Income_Total.
+
+### In fact, just for fun, let's try to remove those extreme outliers from that plot to see if it's more interpretable
+
+```{r}
+# Exclude the top 5 highest values from AMT_INCOME_TOTAL
+filtered_data <- app_train %>%
+  arrange(desc(AMT_INCOME_TOTAL)) %>%  # Sort in descending order
+  slice(-c(1:20))  # Exclude the top 20 rows
+
+# Create boxplot for AMT_INCOME_TOTAL against TARGET
+p_income <- ggplot(filtered_data, aes_string(x = "as.factor(TARGET)", y = "AMT_INCOME_TOTAL")) +
+  geom_boxplot() +
+  labs(title = "Boxplot of AMT_INCOME_TOTAL by TARGET (Top 20 Excluded)",
+       x = "TARGET",
+       y = "AMT_INCOME_TOTAL") +
+  theme_minimal()
+
+# Display the plot
+print(p_income)
+```
+
+### I ended up excluding the top 20 values in each, to try to make it more legible and interpretable, but it seems the data is still very right-skewed. Still, it seems to be confirming what one would intuitively guess, which is that people in class 0 tended to have at least slightly higher incomes on average than those in class 1.
+
+### All of this exploration so far has been on the numeric variables, since we've been calculating correlations and creating boxplots. Let's explore the categorical variables, too, to find what might be strong predictors for our later models. Let's start by performing a chi squared test on each of the categorical variables (after we make sure they're all converted into Factors in the data frame). This will check if the distribution of each categorical variable differs statistically significantly based on the our target variable.
+
+```{r}
+# Check the structure of the app_train data frame to identify categorical columns
+str(app_train)
+
+# Identify and print the names of categorical columns
+categorical_columns <- names(app_train)[sapply(app_train, function(x) is.factor(x) || is.character(x))]
+
+# Print the categorical columns
+print(categorical_columns)
+
+# Optionally, check the number of categorical columns
+cat("Number of categorical columns:", length(categorical_columns), "\n")
+```
+
+
+```{r}
+# Get names of categorical columns (factors or character)
+categorical_columns <- names(app_train)[sapply(app_train, is.factor) | sapply(app_train, is.character)]
+
+# Convert character variables to factors
+app_train <- app_train %>%
+  mutate(across(where(is.character), as.factor))
+
+# Initialize an empty data frame to store the results
+chi_squared_results <- data.frame(
+  Variable = character(),
+  Chi_Squared = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Chi-squared test for categorical predictors
+for (col in categorical_columns) {  # Iterate directly over categorical_columns
+  contingency_table <- table(app_train[[col]], app_train$TARGET)
+  
+  # Perform the Chi-squared test
+  chisq_test <- chisq.test(contingency_table)
+  
+  # Append results to the results data frame
+  chi_squared_results <- rbind(chi_squared_results, 
+                                data.frame(
+                                  Variable = col,
+                                  Chi_Squared = chisq_test$statistic,
+                                  p_value = chisq_test$p.value
+                                ))
+}
+
+# Sort results by Chi_Squared in descending order
+chi_squared_results <- chi_squared_results[order(-chi_squared_results$Chi_Squared), ]
+
+# View the results
+print(chi_squared_results)
+```
+
+### It appears that each of these categorical variables has a statistically significant p-value, but some have a much larger Chi Squared value than others, suggesting a stronger association with the target than others, with Occupation type, Organization type, Income type, Education type, and Gender having the highest.
+
+
+### Let's look into these variables further by visualizing them with boxplots. And let's first calculate the percentage of individuals at each level of each categorical variable for both classes (i.e. finding what percentage of people in class 0 were female vs what percentage of people in Class 1 were female, etc etc for each of the variables), and then plot those percentages. This will be preferrable to simply plotting the count of each individual in each level of each variable, since again 91% of all the individuals in the data are in class 0.
+
+```{r}
+# Loop through each categorical variable
+for (col in categorical_columns) {
+  
+  # Calculate percentages for Class 0
+  percent_data_0 <- app_train %>%
+    filter(TARGET == 0) %>%
+    group_by(!!sym(col)) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    mutate(percentage = count / sum(count) * 100) %>%
+    mutate(Class = "Class 0")
+  
+  # Calculate percentages for Class 1
+  percent_data_1 <- app_train %>%
+    filter(TARGET == 1) %>%
+    group_by(!!sym(col)) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    mutate(percentage = count / sum(count) * 100) %>%
+    mutate(Class = "Class 1")
+  
+  # Combine the two data frames
+  percent_data <- bind_rows(percent_data_0, percent_data_1)
+  
+  # Create the bar plot for percentages
+  p <- ggplot(percent_data, aes_string(x = col, y = "percentage", fill = "Class")) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = paste("Percentage of", col, "by TARGET"),
+         x = col,
+         y = "Percentage") +
+    theme_minimal() +
+    scale_y_continuous(labels = scales::percent_format(scale = 1)) +  # Format y-axis as percentage
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+    
+  print(p)  # Display the plot
+}
+```
+
+### There's a wealth of interesting patterns to be observed here. And just like the Chi squared test suggested, some of the most clearly interpretable patterns can be found in the plots for Occupation, Income, Organization, Education, and Gender. Starting with Occupation, a much greater percentage of the class 1 individuals were low-skill laborers, sales staff, and (interestingly) high skill tech staff than the class 0 individuals. A much greater percentage of individuals in class 1 were male compared to class 0. A greater percentage of individuals in class 1 were in the "Working" income type than class 0. Interestingly, a higher percentage of individuals in class 1 were in the "Secondary / secondary special" eduction type.
+
+### Note: I think this and the other findings from this graph should be taken with a grain of salt, since this is merely reporting differences in the make-up of the class 0 and class 1 group, and since class 1 is so much smaller than class 0, and not a t-test or some other statistical test comparing the levels of each variable. But I think it's still useful to highlight which levels of these variables may end up being strong predictors of loan default, or otherwise proving useful, when we perform more rigorous and tailored statistical analysis futher along in the project.
+
+
+
+
+## Data Cleaning
+
+### We'll take the following data cleaning steps: Exploring missing data with the skimr package, cleaning the data with the janitor package, and then miscellaneous final cleaning. The plots from the predictor exploration phase, particularly the bar plots for the categorical variables, showed a large number of uncategorized responses, so there should definitely be some work to do in this step.
+
+
+```{r}
+# 1. Exploring missing data with the skimr package
+# Call data cleaning libraries
+library(skimr)
+library(janitor)
+
+# Create dataframe of skimr's summary of data
+skim_summary <- skim(app_train)
+
+# Arrange the summary by the number of missing values (n_missing) in descending order
+skim_summary_sorted <- skim_summary %>%
+  arrange(complete_rate)  # You can also sort by complete_rate
+
+# View the sorted result
+print(skim_summary_sorted)
+```
+
+### This reveals that 45 of our 106 variables has a complete rate of less than 52%, with many variables (mostly this suite of variables related to the individuals' quality and type of housing) having a complete rate as low as 1/3. And then after that variable with the 45th lowest complete rate, the next lowest complete rate jumps to about 80%. Best practices for missing data are typically to remove columns with excessively low complete rates, and then impute the missing values for the rest. Since there's such a nice jump from the excessively low (52% and below) to the reasonable (80%+), I think that approach is appropriate. Let's carry it out, with the help of the janitor package.
+
+```{r, warning=FALSE}
+# Identify columns to remove based on complete rate threshold of 52%
+remove_threshold <- 0.52  # Complete rate threshold
+columns_to_remove <- skim_summary_sorted$skim_variable[skim_summary_sorted$complete_rate <= remove_threshold]
+
+# Clean the dataset by removing the identified columns
+app_train_clean <- app_train[, !names(app_train) %in% columns_to_remove]  # Remove columns
+
+# Identify remaining columns that still have missing values
+remaining_columns <- skim(app_train_clean)
+remaining_columns <- remaining_columns[remaining_columns$n_missing > 0, "skim_variable"]  # Get columns with missing values
+
+# Convert to a character vector
+remaining_columns <- as.character(remaining_columns)
+
+# Check the names of remaining columns
+print(remaining_columns)
+
+# Impute missing values for the remaining columns
+# Function to get the mode
+get_mode <- function(x) {
+  unique_x <- unique(x[!is.na(x)])  # Remove NAs
+  if(length(unique_x) == 0) return(NA)  # Return NA if no unique values
+  unique_x[which.max(tabulate(match(x, unique_x)))]  # Find the mode
+}
+
+# Impute for numeric and categorical variables
+for (col in remaining_columns) {
+  if (col %in% names(app_train_clean)) {  # Check if the column exists in the cleaned dataset
+    if (is.numeric(app_train_clean[[col]])) {
+      app_train_clean[[col]][is.na(app_train_clean[[col]])] <- mean(app_train_clean[[col]], na.rm = TRUE)  # Impute with mean for numeric
+    } else {
+      app_train_clean[[col]][is.na(app_train_clean[[col]])] <- get_mode(app_train_clean[[col]])  # Impute with mode for categorical
+    }
+  } else {
+    message(paste("Column", col, "does not exist in the cleaned dataset."))
+  }
+}
+
+```
+
+```{r}
+# Apply Skimr to new, cleaned and imputed df, to make sure missing values are resolved
+skim_summary_clean <- skim(app_train_clean)
+
+# Arrange the summary by the number of missing values (n_missing) in descending order
+skim_summary_cleaned <- skim_summary_clean %>%
+  arrange(complete_rate)  # You can also sort by complete_rate
+
+# View the sorted result
+print(skim_summary_cleaned)
+```
+
+### Good news: the sub-52%-complete-rate columns are gone. Bad news: There are still missing values in the columns with 80%+ complete rate. Let's amend the function that imputes missing values in these specific columns. 
+
+```{r}
+# Check for missing values after imputation
+missing_counts <- colSums(is.na(app_train_clean))
+print(missing_counts[missing_counts > 0])  # Show columns with missing values
+
+# Function to calculate the mode
+get_mode <- function(v) {
+  unique_v <- unique(v)
+  unique_v[which.max(tabulate(match(v, unique_v)))]
+}
+
+# Impute for numeric and categorical variables
+for (col in names(app_train_clean)) {
+  if (is.numeric(app_train_clean[[col]])) {
+    # Impute with mean for numeric
+    app_train_clean[[col]][is.na(app_train_clean[[col]])] <- mean(app_train_clean[[col]], na.rm = TRUE)  
+  } else if (is.factor(app_train_clean[[col]]) || is.character(app_train_clean[[col]])) {
+    # Impute with mode for categorical
+    app_train_clean[[col]][is.na(app_train_clean[[col]])] <- get_mode(app_train_clean[[col]])
+  }
+}
+
+# Check for missing values after imputation
+missing_counts_after <- colSums(is.na(app_train_clean))
+print(missing_counts_after[missing_counts_after > 0])  # Show columns with missing values
+```
+
+```{r}
+# Apply Skimr to df again, to make sure missing values are resolved
+skim_summary_clean <- skim(app_train_clean)
+
+# Arrange the summary by the number of missing values (n_missing) in descending order
+skim_summary_cleaned <- skim_summary_clean %>%
+  arrange(complete_rate)  # You can also sort by complete_rate
+
+# View the sorted result
+print(skim_summary_cleaned)
+```
+
+
+
+## Prepping data for use in my model of choice (Decision tree)
+
+### Now that the data is cleaned and missing values are handled, let's do some last steps to make sure this train dataset is ready for application in a decision tree model. The biggest hurdle we face is the massive imbalance between the number of individuals in class 0 and class 1. We'll use the data processing technique SMOTE (Synthetic Minority Over-sampling Technique), through the smotefamily package, which will generate synthetic examples for class 1 to help with the task of oversampling from the minority class. We'll also undersample from the majority class to create a new, better prepared dataframe. SMOTE
+
+```{r}
+# Load necessary libraries
+library(smotefamily)
+
+# Set seed for reproducibility
+set.seed(42)
+
+# Perform SMOTE using smotefamily
+# smote_result <- SMOTE(TARGET ~ ., 
+                      #data = app_train_clean, 
+                      #perc.over = 100,  # 100% increase in the minority class
+                      #perc.under = 200)  # 200% of the minority class after oversampling
+
+# Convert the result to a dataframe
+# smote_data <- as.data.frame(smote_result)
+
+# Check the structure of the new dataset
+#str(smote_data)
+```
+
+```{r}
+str(app_train_clean)
+```
+
